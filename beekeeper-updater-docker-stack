@@ -1,0 +1,248 @@
+#!/bin/bash
+
+SCRIPT_NAME='beekeeper-updater-docker-stack'
+
+# Utility functions
+assert_required_params() {
+  local docker_compose_yaml_path github_repo stack_name
+  docker_compose_yaml_path="$1"
+  github_repo="$2"
+  stack_name="$3"
+
+  if [ -n "$docker_compose_yaml_path" ] && [ -n "$github_repo" ] && [ -n "$stack_name" ]; then
+    return 0
+  fi
+
+  usage 1>&2
+
+  if [ -z "$docker_compose_yaml_path" ]; then
+    err_echo "Missing -p, --path, or DOCKER_COMPOSE_YAML_PATH argument"
+  fi
+
+  if [ -z "$github_repo" ]; then
+    err_echo "Missing -r, --repo, or GITHUB_REPO argument"
+  fi
+
+  if [ -z "$stack_name" ]; then
+    err_echo "Missing -n, --stack-name, or STACK_NAME argument"
+  fi
+
+  exit 1
+}
+
+debug() {
+  local cyan='\033[0;36m'
+  local no_color='\033[0;0m'
+  local message="$@"
+  matches_debug || return 0
+  (>&2 echo -e "[${cyan}${SCRIPT_NAME}${no_color}]: $message")
+}
+
+err_echo() {
+  local message="$1"
+  echo "$message" 1>&2
+}
+
+matches_debug() {
+  if [ -z "$DEBUG" ]; then
+    return 1
+  fi
+
+  # we actually *do* want glob match
+  # shellcheck disable=SC2053
+  if [[ $SCRIPT_NAME == $DEBUG ]]; then
+    return 0
+  fi
+  return 1
+}
+
+script_directory(){
+  local source="${BASH_SOURCE[0]}"
+  local dir=""
+
+  while [ -h "$source" ]; do # resolve $source until the file is no longer a symlink
+    dir="$( cd -P "$( dirname "$source" )" && pwd )"
+    source="$(readlink "$source")"
+    [[ $source != /* ]] && source="$dir/$source" # if $source was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+  done
+
+  dir="$( cd -P "$( dirname "$source" )" && pwd )"
+
+  echo "$dir"
+}
+
+usage(){
+  echo 'USAGE:'
+  echo "  ${SCRIPT_NAME} [OPTIONS]"
+  echo ''
+  echo 'DESCRIPTION:'
+  echo '  Pulls down a git repository and updates the currently running'
+  echo '  docker stack with the indicated docker-compose.yml'
+  echo ''
+  echo 'OPTIONS:'
+  echo '  -h, --help           Print this help text'
+  echo '  -i, --interval       Time between runs in seconds. Defaults to "60"'
+  echo '                       (env: INTERVAL)'
+  echo '  -n, --stack-name     Name of the docker stack, will be used to namespace'
+  echo '                       the services'
+  echo '  -p, --path           Path within the github repository where the'
+  echo '                       docker-compose.yml file is located relative to'
+  echo '                       the repo root. (env: DOCKER_COMPOSE_YAML_PATH)'
+  echo '  -r, --repo           Github repository where the docker-compose.yml'
+  echo '                       file is located. Auth information can be included'
+  echo '                       here using standard the basic auth format:'
+  echo '                       https://<user>:<password/token>@github.com/<org>/<project>'
+  echo '                       (env: GITHUB_REPO)'
+  echo '  -s, --single-run     Do a single run instead of running in infinite mode'
+  echo '                       (env: SINGLE_RUN="true")'
+  echo '  -v, --version        Print the version'
+  echo ''
+  echo 'ENVIRONMENT:'
+  echo '  DEBUG                Print debug output'
+  echo ''
+}
+
+version(){
+  local directory
+  directory="$(script_directory)"
+
+  if [ -f "$directory/VERSION" ]; then
+    cat "$directory/VERSION"
+  else
+    echo "unknown-version"
+  fi
+}
+
+# App functions
+run() {
+  debug "run"
+  local docker_compose_yaml_path stack_name
+  stack_name="$1"
+  docker_compose_yaml_path="$2"
+
+  debug "updating repository"
+  git pull --quiet || return 1
+
+  debug "docker stack deploy"
+  docker stack deploy --compose-file "$docker_compose_yaml_path" "$stack_name"
+}
+
+run_forever() {
+  local docker_compose_yaml_path interval stack_name
+  interval="$1"
+  stack_name="$2"
+  docker_compose_yaml_path="$3"
+
+  while true; do
+    run "$stack_name" "$docker_compose_yaml_path" || exit 1
+    debug "sleeping for ${interval}s"
+    sleep "$interval"
+  done
+}
+
+setup() {
+  debug 'setup'
+  local exit_code git_clone_output github_repo repo_dir
+  repo_dir="$1"
+  github_repo="$2"
+
+  git config --global user.email "updater@example.com"
+  git config --global user.name "beekeeper-updater-docker-compose"
+  git_clone_output="$(git clone --quiet --depth=1 "$github_repo" "$repo_dir")"
+  exit_code=$?
+
+  if [ "$exit_code" != "0" ]; then
+    err_echo "$git_clone_output"
+    return 1
+  fi
+}
+
+# main execution function
+main() {
+  local docker_compose_yaml_filename docker_compose_yaml_path github_repo interval repo_dir single_run stack_dir stack_name
+
+  # Define args up here
+  while [ "$1" != "" ]; do
+    local param="$1"
+    local value="$2"
+    case "$param" in
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -v | --version)
+        version
+        exit 0
+        ;;
+      -i | --interval)
+        interval="$value"
+        shift
+        ;;
+      -n | --stack-name)
+        stack_name="$value"
+        shift
+        ;;
+      -p | --path)
+        docker_compose_yaml_path="$value"
+        shift
+        ;;
+      -r | --repo)
+        github_repo="$value"
+        shift
+        ;;
+      -s | --single-run)
+        single_run='true'
+        ;;
+      # Arg with value
+      # -x | --example)
+      #   example="$value"
+      #   shift
+      #   ;;
+      # Arg without value
+      # -e | --example-flag)
+      #   example_flag='true'
+      #   ;;
+      *)
+        if [ "${param::1}" == '-' ]; then
+          echo "ERROR: unknown parameter \"$param\""
+          usage
+          exit 1
+        fi
+        # Set main arguments
+        # if [ -z "$main_arg" ]; then
+        #   main_arg="$param"
+        # elif [ -z "$main_arg_2"]; then
+        #   main_arg_2="$param"
+        # fi
+        ;;
+    esac
+    shift
+  done
+
+  docker_compose_yaml_path="${docker_compose_yaml_path:-$DOCKER_COMPOSE_YAML_PATH}"
+  docker_compose_yaml_filename="$(basename "$docker_compose_yaml_path")"
+  github_repo="${github_repo:-$GITHUB_REPO}"
+  interval="${interval:-$INTERVAL}"
+  interval="${interval:-60}"
+  repo_dir="$PWD/repository"
+  stack_dir="$(dirname "$docker_compose_yaml_path")"
+  stack_name="${stack_name:-$STACK_NAME}"
+
+  if [ -z "$single_run" ] && [ "$SINGLE_RUN" == "true" ]; then
+    single_run="true"
+  fi
+
+  assert_required_params "$docker_compose_yaml_path" "$github_repo" "$stack_name"
+
+  setup "$repo_dir" "$github_repo" || exit 1
+
+  pushd "$repo_dir/$stack_dir" > /dev/null
+
+  if [ "$single_run" == "true" ]; then
+    run "$stack_name" "$docker_compose_yaml_filename"
+    exit $?
+  fi
+  run_forever "$interval" "$stack_name" "$docker_compose_yaml_filename"
+}
+
+main "$@"
