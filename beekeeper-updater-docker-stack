@@ -1,19 +1,31 @@
 #!/bin/bash
 
+
 SCRIPT_NAME='beekeeper-updater-docker-stack'
 
 # Utility functions
 assert_required_params() {
-  local docker_compose_yaml_path github_repo stack_name
+  local docker_compose_yaml_path github_repo stack_name docker_username docker_password
   docker_compose_yaml_path="$1"
   github_repo="$2"
   stack_name="$3"
+  docker_username="$4"
+  docker_password="$5"
 
-  if [ -n "$docker_compose_yaml_path" ] && [ -n "$github_repo" ] && [ -n "$stack_name" ]; then
+  if [ -n "$docker_compose_yaml_path" ] && [ -n "$github_repo" ] && [ -n "$stack_name" ] \
+    && [ -n "$docker_username" ] && [ -n "$docker_password" ]; then
     return 0
   fi
 
   usage 1>&2
+
+  if [ -z "$docker_password" ]; then
+    err_echo "Missing --docker-password, or DOCKER_PASSWORD argument"
+  fi
+
+  if [ -z "$docker_username" ]; then
+    err_echo "Missing --docker-username, or DOCKER_USERNAME argument"
+  fi
 
   if [ -z "$docker_compose_yaml_path" ]; then
     err_echo "Missing -p, --path, or DOCKER_COMPOSE_YAML_PATH argument"
@@ -80,22 +92,26 @@ usage(){
   echo '  docker stack with the indicated docker-compose.yml'
   echo ''
   echo 'OPTIONS:'
-  echo '  -h, --help           Print this help text'
-  echo '  -i, --interval       Time between runs in seconds. Defaults to "60"'
-  echo '                       (env: INTERVAL)'
-  echo '  -n, --stack-name     Name of the docker stack, will be used to namespace'
-  echo '                       the services'
-  echo '  -p, --path           Path within the github repository where the'
-  echo '                       docker-compose.yml file is located relative to'
-  echo '                       the repo root. (env: DOCKER_COMPOSE_YAML_PATH)'
-  echo '  -r, --repo           Github repository where the docker-compose.yml'
-  echo '                       file is located. Auth information can be included'
-  echo '                       here using standard the basic auth format:'
-  echo '                       https://<user>:<password/token>@github.com/<org>/<project>'
-  echo '                       (env: GITHUB_REPO)'
-  echo '  -s, --single-run     Do a single run instead of running in infinite mode'
-  echo '                       (env: SINGLE_RUN="true")'
-  echo '  -v, --version        Print the version'
+  echo '  --docker-password     Docker password for pulling private images'
+  echo '                        (env: DOCKER_PASSWORD)'
+  echo '  --docker-username     Docker username for pulling private images'
+  echo '                        (env: DOCKER_USERNAME)'
+  echo '  -h, --help            Print this help text'
+  echo '  -i, --interval        Time between runs in seconds. Defaults to "60"'
+  echo '                        (env: INTERVAL)'
+  echo '  -n, --stack-name      Name of the docker stack, will be used to namespace'
+  echo '                        the services'
+  echo '  -p, --path            Path within the github repository where the'
+  echo '                        docker-compose.yml file is located relative to'
+  echo '                        the repo root. (env: DOCKER_COMPOSE_YAML_PATH)'
+  echo '  -r, --repo            Github repository where the docker-compose.yml'
+  echo '                        file is located. Auth information can be included'
+  echo '                        here using standard the basic auth format:'
+  echo '                        https://<user>:<password/token>@github.com/<org>/<project>'
+  echo '                        (env: GITHUB_REPO)'
+  echo '  -s, --single-run      Do a single run instead of running in infinite mode'
+  echo '                        (env: SINGLE_RUN="true")'
+  echo '  -v, --version         Print the version'
   echo ''
   echo 'ENVIRONMENT:'
   echo '  DEBUG                Print debug output'
@@ -114,6 +130,34 @@ version(){
 }
 
 # App functions
+docker_login(){
+  local docker_username docker_password
+  docker_username="$1"
+  docker_password="$2"
+
+  docker login \
+    --username "$docker_username" \
+    --password "$docker_password" \
+  > /dev/null
+}
+
+git_clone(){
+  debug 'clone'
+  local exit_code git_clone_output github_repo repo_dir
+  repo_dir="$1"
+  github_repo="$2"
+
+  git config --global user.email "updater@example.com"
+  git config --global user.name "beekeeper-updater-docker-compose"
+  git_clone_output="$(git clone --quiet --depth=1 "$github_repo" "$repo_dir")"
+  exit_code=$?
+
+  if [ "$exit_code" != "0" ]; then
+    err_echo "$git_clone_output"
+    return 1
+  fi
+}
+
 run() {
   debug "run"
   local docker_compose_yaml_path stack_name
@@ -142,24 +186,20 @@ run_forever() {
 
 setup() {
   debug 'setup'
-  local exit_code git_clone_output github_repo repo_dir
+  local exit_code git_clone_output github_repo repo_dir docker_username docker_password
   repo_dir="$1"
   github_repo="$2"
+  docker_username="$3"
+  docker_password="$4"
 
-  git config --global user.email "updater@example.com"
-  git config --global user.name "beekeeper-updater-docker-compose"
-  git_clone_output="$(git clone --quiet --depth=1 "$github_repo" "$repo_dir")"
-  exit_code=$?
-
-  if [ "$exit_code" != "0" ]; then
-    err_echo "$git_clone_output"
-    return 1
-  fi
+  docker_login "$docker_username" "$docker_password" \
+  && git_clone "$repo_dir" "$github_repo"
 }
 
 # main execution function
 main() {
-  local docker_compose_yaml_filename docker_compose_yaml_path github_repo interval repo_dir single_run stack_dir stack_name
+  local docker_compose_yaml_filename docker_compose_yaml_path docker_password docker_username
+  local github_repo interval repo_dir single_run stack_dir stack_name
 
   # Define args up here
   while [ "$1" != "" ]; do
@@ -173,6 +213,14 @@ main() {
       -v | --version)
         version
         exit 0
+        ;;
+      --docker-password)
+        docker_password="$value"
+        shift
+        ;;
+      --docker-username)
+        docker_username="$value"
+        shift
         ;;
       -i | --interval)
         interval="$value"
@@ -221,6 +269,8 @@ main() {
 
   docker_compose_yaml_path="${docker_compose_yaml_path:-$DOCKER_COMPOSE_YAML_PATH}"
   docker_compose_yaml_filename="$(basename "$docker_compose_yaml_path")"
+  docker_password="${docker_password:-$DOCKER_PASSWORD}"
+  docker_username="${docker_username:-$DOCKER_USERNAME}"
   github_repo="${github_repo:-$GITHUB_REPO}"
   interval="${interval:-$INTERVAL}"
   interval="${interval:-60}"
@@ -232,9 +282,9 @@ main() {
     single_run="true"
   fi
 
-  assert_required_params "$docker_compose_yaml_path" "$github_repo" "$stack_name"
+  assert_required_params "$docker_compose_yaml_path" "$github_repo" "$stack_name" "$docker_username" "$docker_password"
 
-  setup "$repo_dir" "$github_repo" || exit 1
+  setup "$repo_dir" "$github_repo" "$docker_username" "$docker_password" || exit 1
 
   pushd "$repo_dir/$stack_dir" > /dev/null
 
