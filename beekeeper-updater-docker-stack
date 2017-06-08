@@ -168,7 +168,7 @@ run() {
   git pull --quiet || return 1
 
   debug "docker stack deploy"
-  docker stack deploy --compose-file "$docker_compose_yaml_path" --prune --with-registry-auth "$stack_name"
+  docker stack deploy --compose-file "$docker_compose_yaml_path" --prune --with-registry-auth "$stack_name" > /dev/null
 }
 
 run_forever() {
